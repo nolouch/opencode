@@ -19,12 +19,25 @@ permissions:
 jobs:
   build-linux-x64:
     name: build linux x64 CLI
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: self-hosted
     steps:
       - name: Checkout requested ref
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install native build toolchain
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-10 g++-10
+          echo "CC=gcc-10" >> "$GITHUB_ENV"
+          echo "CXX=g++-10" >> "$GITHUB_ENV"
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
