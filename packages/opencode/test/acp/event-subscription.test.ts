@@ -341,6 +341,206 @@ describe("acp.agent event subscription", () => {
     })
   })
 
+  test("does not emit compaction summary text as assistant chunks", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { agent, controller, chunks, sessionUpdates, stop, sdk } = createFakeAgent()
+        const cwd = "/tmp/opencode-acp-test"
+        const sessionId = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
+
+        sdk.session.message = async () => {
+          return {
+            data: {
+              info: {
+                id: "msg_compaction_summary",
+                role: "assistant",
+                sessionID: sessionId,
+                parentID: "msg_compaction_task",
+                summary: true,
+                mode: "compaction",
+                agent: "compaction",
+              },
+              parts: [
+                {
+                  id: "part_compaction_summary",
+                  type: "text",
+                  text: "## Goal\ninternal summary",
+                },
+              ],
+            },
+          }
+        }
+
+        controller.push({
+          directory: cwd,
+          payload: {
+            type: "message.part.delta",
+            properties: {
+              sessionID: sessionId,
+              messageID: "msg_compaction_summary",
+              partID: "part_compaction_summary",
+              field: "text",
+              delta: "## Goal\ninternal summary",
+            },
+          },
+        } as any)
+
+        await new Promise((r) => setTimeout(r, 20))
+
+        expect(chunks.get(sessionId)).toBeUndefined()
+        expect(
+          sessionUpdates
+            .filter((u) => u.sessionId === sessionId)
+            .some((u) => u.update.sessionUpdate === "agent_message_chunk"),
+        ).toBe(false)
+
+        stop()
+      },
+    })
+  })
+
+  test("emits explicit session metadata when OpenCode compacts a session", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { agent, controller, sessionUpdates, stop } = createFakeAgent()
+        const cwd = "/tmp/opencode-acp-test"
+        const sessionId = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
+
+        controller.push({
+          directory: cwd,
+          payload: {
+            type: "message.part.updated",
+            properties: {
+              sessionID: sessionId,
+              time: Date.now(),
+              part: {
+                id: "part_compaction",
+                sessionID: sessionId,
+                messageID: "msg_compaction_task",
+                type: "compaction",
+                auto: true,
+                overflow: false,
+              },
+            },
+          },
+        } as any)
+        controller.push({
+          directory: cwd,
+          payload: {
+            type: "session.compacted",
+            properties: {
+              sessionID: sessionId,
+            },
+          },
+        } as any)
+
+        await new Promise((r) => setTimeout(r, 20))
+
+        const update = sessionUpdates
+          .filter((u) => u.sessionId === sessionId)
+          .map((u) => u.update)
+          .find((u) => u.sessionUpdate === "session_info_update")
+
+        expect(update).toBeDefined()
+        expect(update?._meta?.["opencode/session_compacted"]).toEqual({
+          sessionID: sessionId,
+          auto: true,
+          overflow: false,
+        })
+
+        stop()
+      },
+    })
+  })
+
+  test("does not replay compaction task or summary when loading session history", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { agent, chunks, sessionUpdates, stop, sdk } = createFakeAgent()
+        const cwd = "/tmp/opencode-acp-test"
+        const sessionId = "ses_1"
+
+        sdk.session.messages = async () => {
+          return {
+            data: [
+              {
+                info: {
+                  id: "msg_compaction_task",
+                  role: "user",
+                  sessionID: sessionId,
+                  model: { providerID: "opencode", modelID: "big-pickle" },
+                  agent: "build",
+                },
+                parts: [
+                  {
+                    id: "part_compaction",
+                    sessionID: sessionId,
+                    messageID: "msg_compaction_task",
+                    type: "compaction",
+                    auto: true,
+                    overflow: false,
+                  },
+                ],
+              },
+              {
+                info: {
+                  id: "msg_compaction_summary",
+                  role: "assistant",
+                  sessionID: sessionId,
+                  parentID: "msg_compaction_task",
+                  summary: true,
+                  mode: "compaction",
+                  agent: "compaction",
+                },
+                parts: [
+                  {
+                    id: "part_compaction_summary",
+                    type: "text",
+                    text: "## Goal\ninternal summary",
+                  },
+                ],
+              },
+              {
+                info: {
+                  id: "msg_answer",
+                  role: "assistant",
+                  sessionID: sessionId,
+                  parentID: "msg_user",
+                  mode: "build",
+                  agent: "build",
+                },
+                parts: [
+                  {
+                    id: "part_answer",
+                    type: "text",
+                    text: "real answer",
+                  },
+                ],
+              },
+            ],
+          }
+        }
+
+        await agent.loadSession({ cwd, sessionId, mcpServers: [] } as any)
+
+        expect(chunks.get(sessionId)).toBe("real answer")
+        expect(
+          sessionUpdates
+            .filter((u) => u.sessionId === sessionId)
+            .filter((u) => u.update.sessionUpdate === "agent_message_chunk"),
+        ).toHaveLength(1)
+
+        stop()
+      },
+    })
+  })
+
   test("keeps concurrent sessions isolated when message.part.delta events are interleaved", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({

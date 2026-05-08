@@ -146,6 +146,7 @@ export class Agent implements ACPAgent {
   private eventStarted = false
   private bashSnapshots = new Map<string, string>()
   private toolStarts = new Set<string>()
+  private compactionParts = new Map<string, { auto: boolean; overflow?: boolean }>()
   private permissionQueues = new Map<string, Promise<void>>()
   private permissionOptions: PermissionOption[] = [
     { optionId: "once", kind: "allow_once", name: "Allow once" },
@@ -270,6 +271,30 @@ export class Agent implements ACPAgent {
         return
       }
 
+      case "session.compacted": {
+        const sessionId = event.properties.sessionID
+        const compaction = this.compactionParts.get(sessionId)
+        await this.connection
+          .sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "session_info_update",
+              _meta: {
+                "opencode/session_compacted": {
+                  sessionID: sessionId,
+                  auto: compaction?.auto,
+                  overflow: compaction?.overflow,
+                },
+              },
+            },
+          })
+          .catch((error) => {
+            log.error("failed to send compaction session info to ACP", { error })
+          })
+        this.compactionParts.delete(sessionId)
+        return
+      }
+
       case "message.part.updated": {
         log.info("message part updated", { event: event.properties })
         const props = event.properties
@@ -277,6 +302,11 @@ export class Agent implements ACPAgent {
         const session = this.sessionManager.tryGet(part.sessionID)
         if (!session) return
         const sessionId = session.id
+
+        if (part.type === "compaction") {
+          this.compactionParts.set(sessionId, { auto: part.auto, overflow: part.overflow })
+          return
+        }
 
         if (part.type === "tool") {
           await this.toolStart(sessionId, part)
@@ -487,6 +517,7 @@ export class Agent implements ACPAgent {
           })
 
         if (!message || message.info.role !== "assistant") return
+        if (this.isCompactionAssistantMessage(message)) return
 
         const part = message.parts.find((p) => p.id === props.partID)
         if (!part) return
@@ -831,6 +862,8 @@ export class Agent implements ACPAgent {
   private async processMessage(message: SessionMessageResponse) {
     log.debug("process message", message)
     if (message.info.role !== "assistant" && message.info.role !== "user") return
+    if (message.parts.some((part) => part.type === "compaction")) return
+    if (this.isCompactionAssistantMessage(message)) return
     const sessionId = message.info.sessionID
 
     for (const part of message.parts) {
@@ -1122,6 +1155,12 @@ export class Agent implements ACPAgent {
   private toolTitle(part: ToolPart) {
     if ("title" in part.state && typeof part.state.title === "string") return part.state.title
     return part.tool
+  }
+
+  private isCompactionAssistantMessage(message: SessionMessageResponse) {
+    if (message.info.role !== "assistant") return false
+    if (message.info.summary === true) return true
+    return message.info.mode === "compaction" || message.info.agent === "compaction"
   }
 
   private async toolStart(sessionId: string, part: ToolPart) {

@@ -1,0 +1,15 @@
+id: acp-hide-compaction-summary
+title: Hide OpenCode compaction summaries from ACP chat
+type: local-only
+owner: nizheming
+introduced_at: 2026-05-08
+modules:
+  - packages/opencode/src/acp/agent.ts
+risk: medium
+upstream:
+  issue: null
+  pr: null
+retention:
+  planned: true
+  drop_when: upstream exposes compaction as explicit ACP metadata and does not stream compaction summaries as assistant text
+status: active
