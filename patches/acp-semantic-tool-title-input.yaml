@@ -1,0 +1,15 @@
+id: acp-semantic-tool-title-input
+title: Prefer semantic ACP tool title and input before completion
+type: bugfix
+owner: nizheming
+introduced_at: 2026-05-08
+modules:
+  - packages/opencode/src/acp/agent.ts
+risk: low
+upstream:
+  issue: null
+  pr: null
+retention:
+  planned: true
+  drop_when: upstream ACP adapter emits semantic tool title/input before completion
+status: active
