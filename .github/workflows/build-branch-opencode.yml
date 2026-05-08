@@ -1,0 +1,91 @@
+name: build-branch-opencode
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or SHA to build. Defaults to the selected workflow ref."
+        required: false
+        type: string
+      embed_web_ui:
+        description: "Embed the web UI in the binary. Investibook ACP runtime builds normally do not need this."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-x64:
+    name: build linux x64 CLI
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout requested ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Prepare build metadata
+        id: meta
+        shell: bash
+        run: |
+          ref="${{ inputs.ref }}"
+          if [ -z "$ref" ]; then
+            ref="${GITHUB_REF_NAME}"
+          fi
+          safe_ref="$(printf '%s' "$ref" | tr '/_ ' '---' | tr -cd 'A-Za-z0-9.-' | sed -E 's/-+/-/g; s/^-//; s/-$//' | cut -c1-40)"
+          if [ -z "$safe_ref" ]; then
+            safe_ref="ref"
+          fi
+          short_sha="$(git rev-parse --short HEAD)"
+          version="0.0.0-${safe_ref}.${short_sha}.${GITHUB_RUN_NUMBER}"
+
+          echo "safe_ref=$safe_ref" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build native Linux x64 opencode
+        working-directory: packages/opencode
+        shell: bash
+        env:
+          OPENCODE_VERSION: ${{ steps.meta.outputs.version }}
+          OPENCODE_CHANNEL: branch
+        run: |
+          args=(--single)
+          if [ "${{ inputs.embed_web_ui }}" != "true" ]; then
+            args+=(--skip-embed-web-ui)
+          fi
+          ./script/build.ts "${args[@]}"
+
+      - name: Smoke test built binary
+        shell: bash
+        run: |
+          packages/opencode/dist/opencode-linux-x64/bin/opencode --version
+
+      - name: Write install hint
+        shell: bash
+        run: |
+          cat > packages/opencode/dist/opencode-linux-x64/INVESTIBOOK_INSTALL.txt <<'EOF'
+          This artifact contains a Linux x64 opencode binary built from the requested branch/ref.
+
+          To use it in Investibook, place the binary on the backend image or volume and set:
+
+            ACP_AGENT_BIN=/path/to/opencode
+
+          Then restart the Investibook backend pod so new ACP sessions use the patched runtime.
+          EOF
+
+      - name: Upload Linux x64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-linux-x64-${{ steps.meta.outputs.safe_ref }}-${{ steps.meta.outputs.short_sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            packages/opencode/dist/opencode-linux-x64/bin/opencode
+            packages/opencode/dist/opencode-linux-x64/package.json
+            packages/opencode/dist/opencode-linux-x64/INVESTIBOOK_INSTALL.txt
