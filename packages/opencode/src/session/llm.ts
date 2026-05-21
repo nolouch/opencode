@@ -330,6 +330,15 @@ const live: Layer.Layer<
           })
         : undefined
 
+      const providerOptions = ProviderTransform.providerOptions(input.model, params.options)
+      l.info("provider options", {
+        modelID: input.model.id,
+        providerID: input.model.providerID,
+        variant: input.user.model.variant,
+        providerOptionKeys: Object.keys(providerOptions),
+        reasoningProviderOptions: extractReasoningProviderOptions(providerOptions),
+      })
+
       return streamText({
         onError(error) {
           l.error("stream error", {
@@ -360,7 +369,7 @@ const live: Layer.Layer<
         temperature: params.temperature,
         topP: params.topP,
         topK: params.topK,
-        providerOptions: ProviderTransform.providerOptions(input.model, params.options),
+        providerOptions,
         activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
         tools,
         toolChoice: input.toolChoice,
@@ -449,6 +458,24 @@ function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "permission" 
     Permission.merge(input.agent.permission, input.permission ?? []),
   )
   return Record.filter(input.tools, (_, k) => input.user.tools?.[k] !== false && !disabled.has(k))
+}
+
+function extractReasoningProviderOptions(providerOptions: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(providerOptions)
+      .map(([provider, value]) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+        const options = value as Record<string, unknown>
+        const reasoningOptions = Object.fromEntries(
+          ["reasoningConfig", "thinking", "reasoning", "reasoningEffort", "thinkingConfig"]
+            .filter((key) => key in options)
+            .map((key) => [key, options[key]]),
+        )
+        if (Object.keys(reasoningOptions).length === 0) return undefined
+        return [provider, reasoningOptions] as const
+      })
+      .filter((entry): entry is readonly [string, Record<string, unknown>] => entry !== undefined),
+  )
 }
 
 // Check if messages contain any tool-call content
