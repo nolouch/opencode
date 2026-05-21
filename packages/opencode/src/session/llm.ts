@@ -339,7 +339,7 @@ const live: Layer.Layer<
         reasoningProviderOptions: extractReasoningProviderOptions(providerOptions),
       })
 
-      return streamText({
+      const result = streamText({
         onError(error) {
           l.error("stream error", {
             error,
@@ -419,6 +419,12 @@ const live: Layer.Layer<
           },
         },
       })
+      return new Proxy(result, {
+        get(target, prop, receiver) {
+          if (prop === "fullStream") return observeFullStream(Reflect.get(target, prop, receiver), l)
+          return Reflect.get(target, prop, receiver)
+        },
+      })
     })
 
     const stream: Interface["stream"] = (input) =>
@@ -476,6 +482,43 @@ function extractReasoningProviderOptions(providerOptions: Record<string, unknown
       })
       .filter((entry): entry is readonly [string, Record<string, unknown>] => entry !== undefined),
   )
+}
+
+async function* observeFullStream(stream: Result["fullStream"], logger: typeof log): AsyncIterable<Event> {
+  for await (const event of stream) {
+    observeStreamEvent(event, logger)
+    yield event
+  }
+}
+
+function observeStreamEvent(event: Event, logger: typeof log) {
+  const value = event as Record<string, any>
+  const type = value.type
+  if (type === "finish-step") {
+    logger.info("stream finish-step usage", {
+      finishReason: value.finishReason,
+      usage: value.usage,
+      providerMetadata: value.providerMetadata,
+    })
+    return
+  }
+  if (type === "finish") {
+    logger.info("stream finish usage", {
+      finishReason: value.finishReason,
+      usage: value.usage,
+      totalUsage: value.totalUsage,
+      providerMetadata: value.providerMetadata,
+    })
+    return
+  }
+  if (type === "reasoning-start" || type === "reasoning-delta" || type === "reasoning-end") {
+    logger.info("stream reasoning event", {
+      type,
+      id: value.id,
+      textLength: typeof value.text === "string" ? value.text.length : undefined,
+      providerMetadata: value.providerMetadata,
+    })
+  }
 }
 
 // Check if messages contain any tool-call content
