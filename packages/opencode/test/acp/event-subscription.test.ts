@@ -41,6 +41,18 @@ function isToolCall(
   return update.sessionUpdate === "tool_call"
 }
 
+function subagentMeta(update: SessionUpdateParams["update"]) {
+  if (!("_meta" in update)) return undefined
+  const meta = update._meta?.["opencode/subagent"]
+  if (!meta || typeof meta !== "object") return undefined
+  return meta as {
+    parentSessionId?: unknown
+    parentTaskCallId?: unknown
+    subagentSessionId?: unknown
+    subagentName?: unknown
+  }
+}
+
 function toolEvent(
   sessionId: string,
   cwd: string,
@@ -875,6 +887,62 @@ describe("acp.agent event subscription", () => {
         expect(running?.title).toBe("Fetch cluster metadata")
         expect(running?.rawInput).toEqual(input)
         expect(running?.locations).toEqual([{ path: "/tmp/semantic.txt" }])
+
+        stop()
+      },
+    })
+  })
+
+  test("forwards subagent child tool updates to the parent ACP session with metadata", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { agent, controller, sessionUpdates, stop } = createFakeAgent()
+        const cwd = "/tmp/opencode-acp-test"
+        const parentSessionId = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
+        const childSessionId = "ses_child"
+
+        controller.push(
+          toolEvent(parentSessionId, cwd, {
+            callID: "task_call",
+            tool: "task",
+            status: "running",
+            input: {
+              description: "collect evidence",
+              prompt: "collect evidence",
+              subagent_type: "evidence-agent",
+            },
+            metadata: { sessionId: childSessionId },
+          }),
+        )
+        controller.push(
+          toolEvent(childSessionId, cwd, {
+            callID: "child_bash",
+            tool: "bash",
+            status: "running",
+            input: { command: "echo hi", description: "run command" },
+            metadata: { output: "hi\n" },
+          }),
+        )
+        await new Promise((r) => setTimeout(r, 20))
+
+        const childUpdates = sessionUpdates
+          .filter((u) => u.sessionId === parentSessionId)
+          .map((u) => u.update)
+          .filter((u) => "toolCallId" in u && u.toolCallId === "child_bash")
+
+        expect(childUpdates.map((u) => u.sessionUpdate)).toEqual(["tool_call", "tool_call_update"])
+        expect(sessionUpdates.some((u) => u.sessionId === childSessionId)).toBe(false)
+
+        const metas = childUpdates.map(subagentMeta)
+        expect(metas.every(Boolean)).toBe(true)
+        for (const meta of metas) {
+          expect(meta?.parentSessionId).toBe(parentSessionId)
+          expect(meta?.parentTaskCallId).toBe("task_call")
+          expect(meta?.subagentSessionId).toBe(childSessionId)
+          expect(meta?.subagentName).toBe("evidence-agent")
+        }
 
         stop()
       },
