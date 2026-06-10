@@ -55,6 +55,12 @@ import { ShellID } from "@/tool/shell/id"
 
 type ModeOption = { id: string; name: string; description?: string }
 type ModelOption = { modelId: string; name: string }
+type SubagentSession = {
+  parentSessionId: string
+  parentTaskCallId: string
+  subagentSessionId: string
+  subagentName?: string
+}
 const decodeTodos = Schema.decodeUnknownResult(Schema.fromJsonString(Schema.Array(Todo.Info)))
 
 const DEFAULT_VARIANT_VALUE = "default"
@@ -147,6 +153,7 @@ export class Agent implements ACPAgent {
   private eventStarted = false
   private shellSnapshots = new Map<string, string>()
   private toolStarts = new Set<string>()
+  private subagentSessions = new Map<string, SubagentSession>()
   private permissionQueues = new Map<string, Promise<void>>()
   private permissionOptions: PermissionOption[] = [
     { optionId: "once", kind: "allow_once", name: "Allow once" },
@@ -276,11 +283,14 @@ export class Agent implements ACPAgent {
         const props = event.properties
         const part = props.part
         const session = this.sessionManager.tryGet(part.sessionID)
-        if (!session) return
-        const sessionId = session.id
+        const subagent = session ? undefined : this.subagentSessions.get(part.sessionID)
+        if (!session && !subagent) return
+        const sessionId = subagent?.parentSessionId ?? session!.id
 
         if (part.type === "tool") {
-          await this.toolStart(sessionId, part)
+          if (session) this.trackSubagentSession(session.id, part)
+          await this.toolStart(sessionId, part, subagent)
+          const meta = this.toolMeta(subagent)
 
           switch (part.state.status) {
             case "pending":
@@ -305,6 +315,7 @@ export class Agent implements ACPAgent {
                           title: part.tool,
                           locations: toLocations(part.tool, part.state.input),
                           rawInput: part.state.input,
+                          _meta: meta,
                         },
                       })
                       .catch((error) => {
@@ -334,6 +345,7 @@ export class Agent implements ACPAgent {
                     locations: toLocations(part.tool, part.state.input),
                     rawInput: part.state.input,
                     ...(content.length > 0 && { content }),
+                    _meta: meta,
                   },
                 })
                 .catch((error) => {
@@ -415,6 +427,7 @@ export class Agent implements ACPAgent {
                       output: part.state.output,
                       metadata: part.state.metadata,
                     },
+                    _meta: meta,
                   },
                 })
                 .catch((error) => {
@@ -448,6 +461,7 @@ export class Agent implements ACPAgent {
                       error: part.state.error,
                       metadata: part.state.metadata,
                     },
+                    _meta: meta,
                   },
                 })
                 .catch((error) => {
@@ -1114,7 +1128,33 @@ export class Agent implements ACPAgent {
     return output
   }
 
-  private async toolStart(sessionId: string, part: ToolPart) {
+  private trackSubagentSession(parentSessionId: string, part: ToolPart) {
+    if (part.tool !== "task") return
+    if (!("metadata" in part.state) || !part.state.metadata || typeof part.state.metadata !== "object") return
+    const subagentSessionId = part.state.metadata["sessionId"]
+    if (typeof subagentSessionId !== "string" || !subagentSessionId) return
+    const input = "input" in part.state ? part.state.input : {}
+    this.subagentSessions.set(subagentSessionId, {
+      parentSessionId,
+      parentTaskCallId: part.callID,
+      subagentSessionId,
+      subagentName: typeof input["subagent_type"] === "string" ? input["subagent_type"] : undefined,
+    })
+  }
+
+  private toolMeta(subagent: SubagentSession | undefined) {
+    if (!subagent) return undefined
+    return {
+      "opencode/subagent": {
+        parentSessionId: subagent.parentSessionId,
+        parentTaskCallId: subagent.parentTaskCallId,
+        subagentSessionId: subagent.subagentSessionId,
+        subagentName: subagent.subagentName,
+      },
+    }
+  }
+
+  private async toolStart(sessionId: string, part: ToolPart, subagent?: SubagentSession) {
     if (this.toolStarts.has(part.callID)) return
     this.toolStarts.add(part.callID)
     await this.connection
@@ -1128,6 +1168,7 @@ export class Agent implements ACPAgent {
           status: "pending",
           locations: [],
           rawInput: {},
+          _meta: this.toolMeta(subagent),
         },
       })
       .catch((error) => {
