@@ -1036,6 +1036,68 @@ describe("acp.agent event subscription", () => {
     })
   })
 
+  test("resolves subagent sessions via parentID when task metadata lacks sessionId", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { agent, controller, sessionUpdates, stop, sdk } = createFakeAgent()
+        const cwd = "/tmp/opencode-acp-test"
+        const parentSessionId = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
+        const childSessionId = "ses_child_by_parent"
+
+        sdk.session.get = async (params?: any) => {
+          if (params?.sessionID === childSessionId) {
+            return { data: { id: childSessionId, parentID: parentSessionId } }
+          }
+          return { data: { id: params?.sessionID ?? "ses_1" } }
+        }
+
+        // Plugin-style task tool: running update carries no metadata at all.
+        controller.push(
+          toolEvent(parentSessionId, cwd, {
+            callID: "task_call_2",
+            tool: "task",
+            status: "running",
+            input: {
+              description: "collect evidence",
+              prompt: "collect evidence",
+              subagent_type: "evidence-agent",
+            },
+          }),
+        )
+        controller.push(
+          toolEvent(childSessionId, cwd, {
+            callID: "child_write",
+            tool: "write",
+            status: "running",
+            input: { filePath: "evidences/ping.txt" },
+          }),
+        )
+        await new Promise((r) => setTimeout(r, 20))
+
+        const childUpdates = sessionUpdates
+          .filter((u) => u.sessionId === parentSessionId)
+          .map((u) => u.update)
+          .filter((u) => "toolCallId" in u && u.toolCallId === "child_write")
+
+        expect(childUpdates.map((u) => u.sessionUpdate)).toEqual(["tool_call", "tool_call_update"])
+        expect(sessionUpdates.some((u) => u.sessionId === childSessionId)).toBe(false)
+
+        const metas = childUpdates.map(subagentMeta)
+        expect(metas.every(Boolean)).toBe(true)
+        for (const meta of metas) {
+          expect(meta?.parentSessionId).toBe(parentSessionId)
+          expect(meta?.parentTaskCallId).toBe("task_call_2")
+          expect(meta?.subagentSessionId).toBe(childSessionId)
+          expect(meta?.subagentName).toBe("evidence-agent")
+        }
+
+        stop()
+      },
+    })
+  })
+
   test("main session deltas do not carry subagent metadata", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({

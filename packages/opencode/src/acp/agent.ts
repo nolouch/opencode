@@ -154,6 +154,8 @@ export class Agent implements ACPAgent {
   private toolStarts = new Set<string>()
   private compactionParts = new Map<string, { auto: boolean; overflow?: boolean }>()
   private subagentSessions = new Map<string, SubagentSession>()
+  private subagentLookupMisses = new Set<string>()
+  private activeTaskCalls = new Map<string, { callID: string; subagentName?: string }>()
   private permissionQueues = new Map<string, Promise<void>>()
   private permissionOptions: PermissionOption[] = [
     { optionId: "once", kind: "allow_once", name: "Allow once" },
@@ -307,7 +309,8 @@ export class Agent implements ACPAgent {
         const props = event.properties
         const part = props.part
         const session = this.sessionManager.tryGet(part.sessionID)
-        const subagent = session ? undefined : this.subagentSessions.get(part.sessionID)
+        let subagent = session ? undefined : this.subagentSessions.get(part.sessionID)
+        if (!session && !subagent) subagent = await this.resolveSubagentSession(part.sessionID)
         if (!session && !subagent) return
         const sessionId = subagent?.parentSessionId ?? session!.id
 
@@ -318,6 +321,7 @@ export class Agent implements ACPAgent {
 
         if (part.type === "tool") {
           if (session) this.trackSubagentSession(session.id, part)
+          if (session) this.trackActiveTaskCall(session.id, part)
           await this.toolStart(sessionId, part, subagent)
           const meta = this.toolMeta(subagent)
 
@@ -512,7 +516,8 @@ export class Agent implements ACPAgent {
       case "message.part.delta": {
         const props = event.properties
         const session = this.sessionManager.tryGet(props.sessionID)
-        const subagent = session ? undefined : this.subagentSessions.get(props.sessionID)
+        let subagent = session ? undefined : this.subagentSessions.get(props.sessionID)
+        if (!session && !subagent) subagent = await this.resolveSubagentSession(props.sessionID)
         const parentSession = subagent ? this.sessionManager.tryGet(subagent.parentSessionId) : undefined
         if (!session && !parentSession) return
         const sessionId = subagent ? parentSession!.id : session!.id
@@ -1193,6 +1198,88 @@ export class Agent implements ACPAgent {
       subagentSessionId,
       subagentName: typeof input["subagent_type"] === "string" ? input["subagent_type"] : undefined,
     })
+  }
+
+  /**
+   * Remember the most recent pending/running `task` call per parent session so
+   * subagent sessions resolved via parentID can be attributed to the task that
+   * spawned them even when the task tool only reports its child sessionId on
+   * completion (e.g. plugin-provided task tools).
+   */
+  private trackActiveTaskCall(parentSessionId: string, part: ToolPart) {
+    if (part.tool !== "task") return
+    const status = part.state.status
+    if (status === "pending" || status === "running") {
+      const input = "input" in part.state && part.state.input && typeof part.state.input === "object" ? part.state.input : {}
+      const subagentType = (input as Record<string, unknown>)["subagent_type"]
+      this.activeTaskCalls.set(parentSessionId, {
+        callID: part.callID,
+        subagentName: typeof subagentType === "string" && subagentType ? subagentType : undefined,
+      })
+      return
+    }
+    const active = this.activeTaskCalls.get(parentSessionId)
+    if (active?.callID === part.callID) this.activeTaskCalls.delete(parentSessionId)
+  }
+
+  /**
+   * Resolve an unknown event session to a subagent mapping by walking its
+   * parentID. Task tools create child sessions with parentID set to the
+   * spawning session, so this works even when the task part never exposes the
+   * child sessionId in its metadata while running.
+   */
+  private async resolveSubagentSession(sessionID: string): Promise<SubagentSession | undefined> {
+    if (this.subagentLookupMisses.has(sessionID)) return undefined
+    const directories = [...new Set(this.sessionManager.all().map((state) => state.cwd))]
+    if (directories.length === 0) return undefined
+
+    let parentID: string | undefined
+    for (const directory of directories) {
+      const info = await this.sdk.session
+        .get({ sessionID, directory }, { throwOnError: true })
+        .then((x) => x.data as { parentID?: string } | undefined)
+        .catch(() => undefined)
+      if (info) {
+        parentID = info.parentID
+        break
+      }
+    }
+
+    let resolved: SubagentSession | undefined
+    if (parentID) {
+      if (this.sessionManager.tryGet(parentID)) {
+        const active = this.activeTaskCalls.get(parentID)
+        resolved = {
+          parentSessionId: parentID,
+          parentTaskCallId: active?.callID ?? "",
+          subagentSessionId: sessionID,
+          subagentName: active?.subagentName,
+        }
+      } else {
+        const parentSub = this.subagentSessions.get(parentID)
+        if (parentSub) {
+          resolved = {
+            parentSessionId: parentSub.parentSessionId,
+            parentTaskCallId: parentSub.parentTaskCallId,
+            subagentSessionId: sessionID,
+            subagentName: parentSub.subagentName,
+          }
+        }
+      }
+    }
+
+    if (!resolved) {
+      this.subagentLookupMisses.add(sessionID)
+      return undefined
+    }
+    this.subagentSessions.set(sessionID, resolved)
+    log.info("resolved subagent session via parentID", {
+      sessionID,
+      parentSessionId: resolved.parentSessionId,
+      parentTaskCallId: resolved.parentTaskCallId,
+      subagentName: resolved.subagentName,
+    })
+    return resolved
   }
 
   private toolMeta(subagent: SubagentSession | undefined) {
