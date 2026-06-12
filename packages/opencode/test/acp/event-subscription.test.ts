@@ -949,6 +949,130 @@ describe("acp.agent event subscription", () => {
     })
   })
 
+  test("forwards subagent text and reasoning deltas to the parent ACP session with metadata", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { agent, controller, sessionUpdates, stop, sdk } = createFakeAgent()
+        const cwd = "/tmp/opencode-acp-test"
+        const parentSessionId = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
+        const childSessionId = "ses_child"
+
+        sdk.session.message = async () => {
+          return {
+            data: {
+              info: { role: "assistant" },
+              parts: [
+                { id: "part_text", type: "text", text: "" },
+                { id: "part_reasoning", type: "reasoning", text: "" },
+              ],
+            },
+          }
+        }
+
+        controller.push(
+          toolEvent(parentSessionId, cwd, {
+            callID: "task_call",
+            tool: "task",
+            status: "running",
+            input: {
+              description: "collect evidence",
+              prompt: "collect evidence",
+              subagent_type: "evidence-agent",
+            },
+            metadata: { sessionId: childSessionId },
+          }),
+        )
+        await new Promise((r) => setTimeout(r, 10))
+
+        controller.push({
+          directory: cwd,
+          payload: {
+            type: "message.part.delta",
+            properties: {
+              sessionID: childSessionId,
+              messageID: "msg_child",
+              partID: "part_text",
+              field: "text",
+              delta: "child says hi",
+            },
+          },
+        } as any)
+        controller.push({
+          directory: cwd,
+          payload: {
+            type: "message.part.delta",
+            properties: {
+              sessionID: childSessionId,
+              messageID: "msg_child",
+              partID: "part_reasoning",
+              field: "text",
+              delta: "child thinking",
+            },
+          },
+        } as any)
+        await new Promise((r) => setTimeout(r, 20))
+
+        const childChunks = sessionUpdates
+          .filter((u) => u.sessionId === parentSessionId)
+          .map((u) => u.update)
+          .filter((u) => u.sessionUpdate === "agent_message_chunk" || u.sessionUpdate === "agent_thought_chunk")
+
+        expect(childChunks.map((u) => u.sessionUpdate)).toEqual(["agent_message_chunk", "agent_thought_chunk"])
+        expect(sessionUpdates.some((u) => u.sessionId === childSessionId)).toBe(false)
+
+        const metas = childChunks.map(subagentMeta)
+        expect(metas.every(Boolean)).toBe(true)
+        for (const meta of metas) {
+          expect(meta?.parentSessionId).toBe(parentSessionId)
+          expect(meta?.parentTaskCallId).toBe("task_call")
+          expect(meta?.subagentSessionId).toBe(childSessionId)
+          expect(meta?.subagentName).toBe("evidence-agent")
+        }
+
+        stop()
+      },
+    })
+  })
+
+  test("main session deltas do not carry subagent metadata", async () => {
+    await using tmp = await tmpdir()
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const { agent, controller, sessionUpdates, stop } = createFakeAgent()
+        const cwd = "/tmp/opencode-acp-test"
+        const sessionId = await agent.newSession({ cwd, mcpServers: [] } as any).then((x) => x.sessionId)
+
+        controller.push({
+          directory: cwd,
+          payload: {
+            type: "message.part.delta",
+            properties: {
+              sessionID: sessionId,
+              messageID: "msg_1",
+              partID: "msg_1_part",
+              field: "text",
+              delta: "hello",
+            },
+          },
+        } as any)
+        await new Promise((r) => setTimeout(r, 10))
+
+        const chunkUpdates = sessionUpdates
+          .filter((u) => u.sessionId === sessionId)
+          .map((u) => u.update)
+          .filter((u) => u.sessionUpdate === "agent_message_chunk")
+
+        expect(chunkUpdates.length).toBe(1)
+        expect(chunkUpdates.map(subagentMeta).every((meta) => meta === undefined)).toBe(true)
+
+        stop()
+      },
+    })
+  })
+
   test("does not emit duplicate synthetic pending after replayed running tool", async () => {
     await using tmp = await tmpdir()
     await Instance.provide({

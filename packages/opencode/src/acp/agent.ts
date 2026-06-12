@@ -512,15 +512,17 @@ export class Agent implements ACPAgent {
       case "message.part.delta": {
         const props = event.properties
         const session = this.sessionManager.tryGet(props.sessionID)
-        if (!session) return
-        const sessionId = session.id
+        const subagent = session ? undefined : this.subagentSessions.get(props.sessionID)
+        const parentSession = subagent ? this.sessionManager.tryGet(subagent.parentSessionId) : undefined
+        if (!session && !parentSession) return
+        const sessionId = subagent ? parentSession!.id : session!.id
 
         const message = await this.sdk.session
           .message(
             {
               sessionID: props.sessionID,
               messageID: props.messageID,
-              directory: session.cwd,
+              directory: (session ?? parentSession)!.cwd,
             },
             { throwOnError: true },
           )
@@ -547,6 +549,7 @@ export class Agent implements ACPAgent {
                   type: "text",
                   text: props.delta,
                 },
+                _meta: this.toolMeta(subagent),
               },
             })
             .catch((error) => {
@@ -566,6 +569,7 @@ export class Agent implements ACPAgent {
                   type: "text",
                   text: props.delta,
                 },
+                _meta: this.toolMeta(subagent),
               },
             })
             .catch((error) => {
