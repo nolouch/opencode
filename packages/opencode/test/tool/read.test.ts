@@ -315,6 +315,19 @@ describe("tool.read truncation", () => {
     }),
   )
 
+  it.live("coerces offset 0 to read from the first line", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const lines = Array.from({ length: 5 }, (_, i) => `line${i + 1}`).join("\n")
+      yield* put(path.join(dir, "zero.txt"), lines)
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "zero.txt"), offset: 0, limit: 3 })
+      expect(result.output).toContain("1: line1")
+      expect(result.output).toContain("3: line3")
+      expect(result.output).not.toContain("0: ")
+    }),
+  )
+
   it.live("throws when offset is beyond end of file", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped()

@@ -153,8 +153,12 @@ export const ReadTool = Tool.define(
       params: Schema.Schema.Type<typeof Parameters>,
       ctx: Tool.Context,
     ) {
+      // `offset` is 1-indexed (line numbers are 1-based), but models frequently
+      // emit `offset: 0` treating it as a 0-based byte/line offset. Coerce 0 to
+      // 1 ("start from the first line") instead of hard-failing, which otherwise
+      // makes the model retry the same read in a loop and stall the session.
       if (params.offset !== undefined && params.offset < 1) {
-        return yield* Effect.fail(new Error("offset must be greater than or equal to 1"))
+        params = { ...params, offset: 1 }
       }
 
       let filepath = params.filePath
